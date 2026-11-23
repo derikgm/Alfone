@@ -1,0 +1,18 @@
+[package]
+name = "alfone-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Build-time hint for platforms where the display server is not detectable at
+# runtime. Kept for future packaging (e.g. a Wayland-only Flatpak).
+wayland = []
+
+[dependencies]
+bitflags.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true

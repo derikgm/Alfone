@@ -1,0 +1,14 @@
+[package]
+name = "alfone-clipboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alfone-protocol.workspace = true
+anyhow.workspace = true
+arboard = "3.7"
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

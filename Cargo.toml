@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/alfone-protocol",
+    "crates/alfone-core",
+    "crates/alfone-net",
+    "crates/alfone-input",
+    "crates/alfone-clipboard",
+    "crates/alfone-media",
+    "crates/alfone-discovery",
+    "crates/alfone-cli",
+]
+# The Tauri desktop app has its own build (needs WebView2/WebKitGTK). Keeping it
+# out of the workspace lets `cargo test` work on headless machines and CI.
+exclude = ["apps/alfone-gui/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+authors = ["Alfone contributors"]
+repository = "https://example.invalid/alfone"
+
+[workspace.dependencies]
+alfone-protocol = { path = "crates/alfone-protocol" }
+alfone-core = { path = "crates/alfone-core" }
+alfone-net = { path = "crates/alfone-net" }
+alfone-input = { path = "crates/alfone-input" }
+alfone-clipboard = { path = "crates/alfone-clipboard" }
+alfone-media = { path = "crates/alfone-media" }
+alfone-discovery = { path = "crates/alfone-discovery" }
+
+anyhow = "1"
+bitflags = { version = "2", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+directories = "6"
+postcard = { version = "1", features = ["use-std"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "sync",
+    "time",
+    "io-util",
+    "signal",
+] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.8", features = ["json", "http1"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -88,7 +88,7 @@ fn new_pin() -> String {
 // Local HTTP control plane (daemon -> UI)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HealthResponse {
     ok: bool,
@@ -115,7 +115,7 @@ struct LayoutResponse {
     primary: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ScreenInput {
     id: String,
     name: String,

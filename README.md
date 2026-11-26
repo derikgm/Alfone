@@ -86,6 +86,17 @@ pnpm tauri dev
 Linux: `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf`.
 Windows: WebView2 (viene con Windows 10/11). macOS: Xcode CLT.
 
+Notas del entorno de desarrollo:
+
+- pnpm 12 ignora el campo `pnpm` de `package.json`; las dependencias con
+  scripts de build se aprueban en `pnpm-workspace.yaml` con `allowBuilds`
+  (por eso `esbuild: true` está ahí).
+- Si el repo vive en una partición NTFS vía FUSE (`fuseblk`), compilar ahí es
+  muy lento y puede bloquear la I/O. Redirige el `target` a disco nativo:
+  `CARGO_TARGET_DIR="$HOME/.cache/alfone-target" pnpm tauri dev`.
+- Si `node` viene de snap y falla con `snap-confine ... cap_dac_override`,
+  instala un Node oficial en `~/.local/opt` y ponlo primero en el `PATH`.
+
 ## Licencia
 
 MIT OR Apache-2.0. Input Leap es GPL-2.0; este proyecto es una implementación

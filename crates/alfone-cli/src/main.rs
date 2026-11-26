@@ -10,6 +10,7 @@
 //!
 //! `init`, `doctor` and `pair` are the setup/diagnostic commands.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -581,42 +582,47 @@ async fn run_server_session(
     let mut remote_pos = (0i32, 0i32);
     let mut entry = side;
     let mut sequence = 0u64;
+    let mut locked = false;
+    // X11 autorepeat delivers repeated `Press` events while a key is held.
+    // Track physically down keys so a shortcut fires once per real press.
+    let mut keys_down: HashSet<u32> = HashSet::new();
+
+    println!(
+        "  shortcuts: Ctrl+Alt+Esc local, Ctrl+Alt+arrows switch, Ctrl+Alt+L lock"
+    );
 
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
 
-    loop {
+    'session: loop {
         tokio::select! {
             captured = capture_rx.recv() => {
                 let Some(captured) = captured else {
                     return Ok(SessionEnd::Shutdown);
                 };
+                // While locked, non-key input must never reach the remote side
+                // (and must not trigger another edge crossing).
+                if locked && !matches!(&captured.event, InputEvent::Key(_)) {
+                    continue 'session;
+                }
                 match captured.event {
                     InputEvent::PointerAbs { x, y } => {
-                        if !remote {
+                        if !remote && !locked {
                             last = (x, y);
                             if let Some(direction) = edge_at(x, y, local_w, local_h) {
-                                if layout.neighbor("local", direction).is_some() {
-                                    let ratio = ratio_along(direction, x, y, local_w, local_h);
-                                    let Some(crossing) = layout.cross("local", direction, ratio) else {
-                                        continue;
-                                    };
-                                    sequence += 1;
-                                    tx.send(Message::EnterScreen(EnterScreen {
-                                        x: crossing.x,
-                                        y: crossing.y,
-                                        sequence,
-                                        modifiers: Modifiers::empty(),
-                                    })).await?;
+                                let ratio = ratio_along(direction, x, y, local_w, local_h);
+                                if let Some((entry_dir, pos, center)) = enter_remote(
+                                    direction,
+                                    ratio,
+                                    &tx,
+                                    &mut *inject,
+                                    &layout,
+                                    &mut sequence,
+                                )
+                                .await?
+                                {
                                     remote = true;
-                                    entry = direction;
-                                    remote_pos = (crossing.x, crossing.y);
-                                    inject.set_remote_mode(true)?;
-                                    // The local cursor is clamped at the screen edge,
-                                    // so move it to the middle to keep receiving
-                                    // relative motion. The warp-generated event
-                                    // reports the centre and yields a zero delta.
-                                    let center = (local_w / 2, local_h / 2);
-                                    inject.warp(center.0, center.1)?;
+                                    entry = entry_dir;
+                                    remote_pos = pos;
                                     last = center;
                                     info!(?direction, "pointer moved to the remote screen");
                                 }
@@ -642,26 +648,95 @@ async fn run_server_session(
                         }
                     }
                     InputEvent::Key(event) => {
-                        if remote {
-                            let release = key::ESCAPE == event.keysym
-                                && event.action == KeyAction::Press
-                                && event.modifiers.contains(Modifiers::CONTROL | Modifiers::ALT);
-                            if release {
-                                release_remote_keys(&tx).await;
-                                return_to_local(
-                                    inject,
-                                    &layout,
-                                    entry,
-                                    remote_pos,
-                                    remote_screen,
-                                )?;
-                                remote = false;
-                                last = inject.pointer().unwrap_or((local_w / 2, local_h / 2));
-                                info!("returned to the local screen (Ctrl+Alt+Esc)");
-                            } else {
-                                tx.send(Message::Input(InputEvent::Key(event))).await?;
+                        // X11 reports autorepeat as another `Press`. Remember
+                        // which keys are physically down so a held shortcut
+                        // fires once, while ordinary keys still repeat on the
+                        // remote side.
+                        let already_down =
+                            is_repeat(event.action, event.keysym, &mut keys_down);
+                        if let Some(hot) = hotkey_from(&event) {
+                            if already_down {
+                                continue 'session;
                             }
+                            match hot {
+                                Hotkey::ToggleLock => {
+                                    locked = !locked;
+                                    if locked && remote {
+                                        let _ = release_remote_keys(&tx).await;
+                                        return_to_local(
+                                            inject,
+                                            &layout,
+                                            entry,
+                                            remote_pos,
+                                            remote_screen,
+                                        )?;
+                                        remote = false;
+                                        last =
+                                            inject.pointer().unwrap_or((local_w / 2, local_h / 2));
+                                    }
+                                    info!(locked, "input lock toggled (Ctrl+Alt+L)");
+                                }
+                                Hotkey::Return => {
+                                    if remote {
+                                        release_remote_keys(&tx).await;
+                                        return_to_local(
+                                            inject,
+                                            &layout,
+                                            entry,
+                                            remote_pos,
+                                            remote_screen,
+                                        )?;
+                                        remote = false;
+                                        last = inject
+                                            .pointer()
+                                            .unwrap_or((local_w / 2, local_h / 2));
+                                        info!("returned to the local screen (Ctrl+Alt+Esc)");
+                                    }
+                                }
+                                Hotkey::Switch(direction) => {
+                                    if remote {
+                                        release_remote_keys(&tx).await;
+                                        return_to_local(
+                                            inject,
+                                            &layout,
+                                            entry,
+                                            remote_pos,
+                                            remote_screen,
+                                        )?;
+                                        remote = false;
+                                        last = inject
+                                            .pointer()
+                                            .unwrap_or((local_w / 2, local_h / 2));
+                                    }
+                                    // Switching screens always releases the lock.
+                                    locked = false;
+                                    if let Some((entry_dir, pos, center)) = enter_remote(
+                                        direction,
+                                        0.5,
+                                        &tx,
+                                        &mut *inject,
+                                        &layout,
+                                        &mut sequence,
+                                    )
+                                    .await?
+                                    {
+                                        remote = true;
+                                        entry = entry_dir;
+                                        remote_pos = pos;
+                                        last = center;
+                                        info!(?direction, "switched screen (Ctrl+Alt+arrow)");
+                                    } else {
+                                        debug!(?direction, "no neighbour screen in that direction");
+                                    }
+                                }
+                            }
+                            // The shortcut belongs to the daemon: never forward it.
+                            continue 'session;
                         }
+                        if locked || !remote {
+                            continue 'session;
+                        }
+                        tx.send(Message::Input(InputEvent::Key(event))).await?;
                     }
                     other => {
                         if remote {
@@ -1106,6 +1181,84 @@ fn build_layout(
     .expect("generated layout is valid")
 }
 
+/// Global server shortcuts. All use Ctrl+Alt so they cannot collide with
+/// ordinary typing on either side of the KVM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hotkey {
+    /// Return control to the local screen.
+    Return,
+    /// Freeze input forwarding (useful to release the remote machine).
+    ToggleLock,
+    /// Cross to the neighbour in this direction.
+    Switch(Direction),
+}
+
+/// X11 autorepeat arrives as another `Press` for the same keysym. Remember
+/// which keys are physically down so a held shortcut fires exactly once.
+fn is_repeat(action: KeyAction, keysym: u32, keys_down: &mut HashSet<u32>) -> bool {
+    match action {
+        KeyAction::Press => !keys_down.insert(keysym),
+        KeyAction::Release => {
+            keys_down.remove(&keysym);
+            false
+        }
+        KeyAction::Repeat => true,
+    }
+}
+
+fn hotkey_from(event: &KeyEvent) -> Option<Hotkey> {
+    if event.action != KeyAction::Press
+        || !event.modifiers.contains(Modifiers::CONTROL | Modifiers::ALT)
+    {
+        return None;
+    }
+    match event.keysym {
+        key::ESCAPE => Some(Hotkey::Return),
+        key::LEFT => Some(Hotkey::Switch(Direction::Left)),
+        key::RIGHT => Some(Hotkey::Switch(Direction::Right)),
+        key::UP => Some(Hotkey::Switch(Direction::Top)),
+        key::DOWN => Some(Hotkey::Switch(Direction::Bottom)),
+        // ASCII keysyms are the character itself; 'l' for lock.
+        keysym if keysym == key::from_char('l') => Some(Hotkey::ToggleLock),
+        _ => None,
+    }
+}
+
+/// Hand the pointer over to the remote screen: announce the crossing, grab
+/// local input and park the local cursor in the centre so relative motion keeps
+/// flowing. Returns `(entry direction, remote position, local centre)`.
+async fn enter_remote(
+    direction: Direction,
+    ratio: f32,
+    tx: &tokio::sync::mpsc::Sender<Message>,
+    inject: &mut dyn Inject,
+    layout: &Layout,
+    sequence: &mut u64,
+) -> Result<Option<(Direction, (i32, i32), (i32, i32))>> {
+    if layout.neighbor("local", direction).is_none() {
+        return Ok(None);
+    }
+    let Some(crossing) = layout.cross("local", direction, ratio) else {
+        return Ok(None);
+    };
+    *sequence += 1;
+    tx.send(Message::EnterScreen(EnterScreen {
+        x: crossing.x,
+        y: crossing.y,
+        sequence: *sequence,
+        modifiers: Modifiers::empty(),
+    }))
+    .await?;
+    inject.set_remote_mode(true)?;
+    let screen = inject.screen();
+    let center = (
+        screen.width.max(1) as i32 / 2,
+        screen.height.max(1) as i32 / 2,
+    );
+    inject.warp(center.0, center.1)?;
+    Ok(Some((direction, (crossing.x, crossing.y), center)))
+}
+
 /// Which border, if any, the pointer is touching. X11 cannot report motion past
 /// the screen border, so touching it is enough to start a crossing.
 fn edge_at(x: i32, y: i32, width: i32, height: i32) -> Option<Direction> {
@@ -1147,4 +1300,74 @@ fn ratio_along(direction: Direction, x: i32, y: i32, width: i32, height: i32) ->
     value.clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn event(keysym: u32, action: KeyAction, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            action,
+            keysym,
+            hid: 0,
+            native: 0,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn hotkeys_need_press_and_ctrl_alt() {
+        let combo = Modifiers::CONTROL | Modifiers::ALT;
+        assert_eq!(hotkey_from(&event(key::ESCAPE, KeyAction::Press, combo)), Some(Hotkey::Return));
+        assert_eq!(
+            hotkey_from(&event(key::ESCAPE, KeyAction::Release, combo)),
+            None
+        );
+        assert_eq!(
+            hotkey_from(&event(key::ESCAPE, KeyAction::Press, Modifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            hotkey_from(&event(key::ESCAPE, KeyAction::Press, Modifiers::empty())),
+            None
+        );
+    }
+
+    #[test]
+    fn autorepeat_is_detected_once_per_physical_press() {
+        let mut down = HashSet::new();
+        assert!(!is_repeat(KeyAction::Press, 0x6c, &mut down));
+        assert!(is_repeat(KeyAction::Press, 0x6c, &mut down));
+        assert!(!is_repeat(KeyAction::Release, 0x6c, &mut down));
+        assert!(!is_repeat(KeyAction::Press, 0x6c, &mut down));
+        assert!(is_repeat(KeyAction::Repeat, 0x6c, &mut down));
+    }
+
+    #[test]
+    fn hotkeys_map_every_action() {
+        let combo = Modifiers::CONTROL | Modifiers::ALT;
+        assert_eq!(
+            hotkey_from(&event(key::from_char('l'), KeyAction::Press, combo)),
+            Some(Hotkey::ToggleLock)
+        );
+        assert_eq!(
+            hotkey_from(&event(key::LEFT, KeyAction::Press, combo)),
+            Some(Hotkey::Switch(Direction::Left))
+        );
+        assert_eq!(
+            hotkey_from(&event(key::RIGHT, KeyAction::Press, combo)),
+            Some(Hotkey::Switch(Direction::Right))
+        );
+        assert_eq!(
+            hotkey_from(&event(key::UP, KeyAction::Press, combo)),
+            Some(Hotkey::Switch(Direction::Top))
+        );
+        assert_eq!(
+            hotkey_from(&event(key::DOWN, KeyAction::Press, combo)),
+            Some(Hotkey::Switch(Direction::Bottom))
+        );
+        assert_eq!(
+            hotkey_from(&event(key::from_char('x'), KeyAction::Press, combo)),
+            None
+        );
+    }
+}

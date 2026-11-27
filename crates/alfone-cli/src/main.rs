@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 mod http;
@@ -570,10 +571,13 @@ async fn cmd_serve(explicit: Option<&Path>, args: ServeArgs) -> Result<()> {
         config.security.http_token = token.clone();
         config.save_to(&path)?;
     }
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let http_state = http::HttpState {
         token: token.clone(),
         config_path: path.clone(),
         state: Arc::new(AtomicU8::new(http::STATE_IDLE)),
+        pin: pin.clone(),
+        shutdown: shutdown_tx,
     };
     let http_state_task = http_state.clone();
     let session_state = http_state.state.clone();
@@ -647,6 +651,10 @@ async fn cmd_serve(explicit: Option<&Path>, args: ServeArgs) -> Result<()> {
                     println!("bye");
                     return Ok(());
                 }
+                _ = wait_shutdown(&mut shutdown_rx) => {
+                    println!("bye (shutdown requested by the control panel)");
+                    return Ok(());
+                }
             }
         };
 
@@ -660,6 +668,7 @@ async fn cmd_serve(explicit: Option<&Path>, args: ServeArgs) -> Result<()> {
                     local_screen,
                     side,
                     &local_name,
+                    &mut shutdown_rx,
                 )
                 .await
                 {
@@ -691,6 +700,16 @@ enum SessionEnd {
     Shutdown,
 }
 
+/// Resolves when the control panel asks for a graceful shutdown.
+async fn wait_shutdown(rx: &mut watch::Receiver<bool>) {
+    loop {
+        let requested = *rx.borrow();
+        if requested || rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn run_server_session(
     peer: Peer,
     inject: &mut dyn Inject,
@@ -698,6 +717,7 @@ async fn run_server_session(
     local_screen: ScreenInfo,
     side: Direction,
     local_name: &str,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<SessionEnd> {
     let Peer {
         mut link,
@@ -958,6 +978,16 @@ async fn run_server_session(
             _ = &mut ctrl_c => {
                 let _ = tx.send(Message::Disconnect {
                     reason: "server shutting down".into(),
+                }).await;
+                if remote {
+                    let _ = inject.set_remote_mode(false);
+                }
+                return Ok(SessionEnd::Shutdown);
+            }
+
+            _ = wait_shutdown(shutdown_rx) => {
+                let _ = tx.send(Message::Disconnect {
+                    reason: "stopped by the control panel".into(),
                 }).await;
                 if remote {
                     let _ = inject.set_remote_mode(false);

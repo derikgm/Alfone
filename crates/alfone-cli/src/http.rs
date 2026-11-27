@@ -17,10 +17,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 /// Session state of the daemon: 0 = idle, 1 = active input session.
 pub const STATE_IDLE: u8 = 0;
@@ -35,12 +36,24 @@ pub struct HttpState {
     pub config_path: PathBuf,
     /// 0 = idle, 1 = active.
     pub state: Arc<AtomicU8>,
+    /// PIN actually used by this `serve` run (shown to the control panel).
+    pub pin: Option<String>,
+    /// Set by `POST /session/shutdown`; the accept loop watches it.
+    pub shutdown: watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Health {
     pub ok: bool,
     pub state: u8,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionResponse {
+    pub role: &'static str,
+    pub state: u8,
+    pub pin: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,6 +74,8 @@ pub fn router(state: HttpState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
+        .route("/session", get(session_get))
+        .route("/session/shutdown", post(session_shutdown))
         .route("/layout", get(layout_get).put(layout_put))
         .with_state(state)
 }
@@ -109,6 +124,35 @@ async fn health(State(state): State<HttpState>, headers: HeaderMap) -> Response 
         state: state.state.load(Ordering::SeqCst),
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// What the local control panel needs to show the current session. The daemon
+/// is always the server side; client sessions are separate processes.
+async fn session_get(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    let body = SessionResponse {
+        role: "server",
+        state: state.state.load(Ordering::SeqCst),
+        pin: state.pin.clone(),
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Graceful shutdown requested by the control panel. The accept loop observes
+/// the watch channel and exits like Ctrl+C.
+async fn session_shutdown(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    if state.shutdown.send(true).is_err() {
+        return server_error("the daemon is already shutting down".into());
+    }
+    (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
 }
 
 async fn status(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -215,6 +259,8 @@ mod tests {
                 token.len()
             )),
             state: Arc::new(AtomicU8::new(STATE_IDLE)),
+            pin: Some("123456".into()),
+            shutdown: watch::channel(false).0,
         }
     }
 
@@ -254,6 +300,63 @@ mod tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn session_exposes_the_real_pin() {
+        let app = router(test_state("secret"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/session")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["role"], "server");
+        assert_eq!(value["pin"], "123456");
+    }
+
+    #[tokio::test]
+    async fn shutdown_requires_token_and_sets_the_flag() {
+        let state = test_state("secret");
+        let receiver = state.shutdown.subscribe();
+        let app = router(state);
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/session/shutdown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(!*receiver.borrow());
+
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/session/shutdown")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert!(*receiver.borrow());
     }
 
     #[tokio::test]

@@ -24,6 +24,26 @@ type Health = {
   state: number;
 };
 
+type DaemonSession = {
+  role: string;
+  state: number;
+  pin: string | null;
+};
+
+type LocalSession = {
+  running: boolean;
+  role: string | null;
+  pid: number | null;
+  exitCode: number | null;
+};
+
+type SessionInfo = {
+  daemon: DaemonSession | null;
+  local: LocalSession;
+  logPath: string;
+  binary: string;
+};
+
 type LayoutScreen = {
   id: string;
   name: string;
@@ -48,6 +68,13 @@ const demoStatus: Status = {
   platform: "LinuxX11",
   fingerprint: null,
   shortCode: null,
+};
+
+const demoSession: SessionInfo = {
+  daemon: null,
+  local: { running: false, role: null, pid: null, exitCode: null },
+  logPath: "~/.config/alfone/Alfone/alfone-session.log",
+  binary: "alfone",
 };
 
 const demoLayout: Layout = {
@@ -83,8 +110,11 @@ function isTauri(): boolean {
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
+  const [session, setSession] = useState<SessionInfo | null>(null);
   const [layout, setLayout] = useState<Layout | null>(null);
   const [pin, setPin] = useState<string>("");
+  const [clientAddress, setClientAddress] = useState<string>("");
+  const [clientFingerprint, setClientFingerprint] = useState<string>("");
   const [side, setSide] = useState<Side>("right");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -103,6 +133,7 @@ export default function App() {
       if (!isTauri()) {
         setStatus(demoStatus);
         setHealth({ ok: true, state: 0 });
+        setSession(demoSession);
         setLayout(demoLayout);
         return;
       }
@@ -148,6 +179,18 @@ export default function App() {
           setHealth(null);
         }
       }
+      // Session info succeeds even when the daemon is down: it reports the
+      // child PID held by the panel (or that no session exists).
+      try {
+        const info = await invoke<SessionInfo>("session_info");
+        if (!cancelled) {
+          setSession(info);
+        }
+      } catch {
+        if (!cancelled) {
+          setSession(null);
+        }
+      }
     };
     void poll();
     const id = window.setInterval(() => void poll(), 5000);
@@ -186,6 +229,72 @@ export default function App() {
     }
   };
 
+  const startServer = async () => {
+    setBusy(true);
+    try {
+      if (!isTauri()) {
+        setSession({
+          ...demoSession,
+          daemon: { role: "server", state: 0, pin: pin || "123456" },
+          local: { running: true, role: "server", pid: 4242, exitCode: null },
+        });
+      } else {
+        setSession(
+          await invoke<SessionInfo>("start_server", {
+            pin: pin || null,
+            side,
+          }),
+        );
+      }
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startClient = async () => {
+    setBusy(true);
+    try {
+      if (!isTauri()) {
+        setSession({
+          ...demoSession,
+          local: { running: true, role: "client", pid: 4243, exitCode: null },
+        });
+      } else {
+        setSession(
+          await invoke<SessionInfo>("start_client", {
+            server: clientAddress,
+            pin,
+            fingerprint: clientFingerprint || null,
+          }),
+        );
+      }
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopSession = async () => {
+    setBusy(true);
+    try {
+      setSession(
+        isTauri()
+          ? await invoke<SessionInfo>("stop_session")
+          : demoSession,
+      );
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const copy = async (value: string, label: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -196,8 +305,13 @@ export default function App() {
     }
   };
 
+  // Once the daemon is up, its own PIN wins: it may have generated one when
+  // the panel started `serve` without an explicit PIN.
+  const activePin = session?.daemon?.pin || pin;
+  const daemonOnline = Boolean(session?.daemon || health);
+  const sessionActive = Boolean(session?.local.running || daemonOnline);
   const serverCommand =
-    pin.length > 0 ? `alfone serve --pin ${pin}` : "alfone serve";
+    activePin.length > 0 ? `alfone serve --pin ${activePin}` : "alfone serve";
 
   const localScreen =
     layout?.screens.find((screen) => screen.id === layout.primary) ??
@@ -411,18 +525,123 @@ export default function App() {
           )}
         </article>
 
+        <article className="card session">
+          <header>
+            <h2>Sesión</h2>
+            <span
+              className={
+                sessionActive ? "badge active-badge" : "badge muted-badge"
+              }
+            >
+              {sessionActive ? "en marcha" : "detenida"}
+            </span>
+          </header>
+          <p className="muted">
+            El daemon posee el teclado y la sesión QUIC. Esta ventana solo lanza
+            y detiene el proceso.
+          </p>
+          <div className="session-facts">
+            <div>
+              <span>Rol</span>
+              <strong>
+                {session?.local.role ?? session?.daemon?.role ?? "—"}
+              </strong>
+            </div>
+            <div>
+              <span>PID</span>
+              <strong className="mono">{session?.local.pid ?? "—"}</strong>
+            </div>
+            <div>
+              <span>Estado</span>
+              <strong>
+                {session?.daemon
+                  ? session.daemon.state === 1
+                    ? "activa"
+                    : "en espera"
+                  : session?.local.running
+                    ? "conectando"
+                    : "—"}
+              </strong>
+            </div>
+          </div>
+          {!daemonOnline && (
+            <>
+              <div className="field">
+                <label htmlFor="server-address">Servidor al que conectar</label>
+                <input
+                  id="server-address"
+                  className="mono"
+                  value={clientAddress}
+                  onChange={(event) => setClientAddress(event.target.value)}
+                  placeholder="192.168.1.20:24800"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="server-fingerprint">
+                  Huella esperada (opcional)
+                </label>
+                <input
+                  id="server-fingerprint"
+                  className="mono"
+                  value={clientFingerprint}
+                  onChange={(event) => setClientFingerprint(event.target.value)}
+                  placeholder="Se fija en el primer emparejamiento"
+                />
+              </div>
+            </>
+          )}
+          <div className="actions">
+            <button
+              className="primary"
+              disabled={busy || sessionActive}
+              onClick={() => void startServer()}
+            >
+              Iniciar servidor
+            </button>
+            <button
+              className="ghost"
+              disabled={
+                busy || sessionActive || clientAddress.trim().length === 0
+              }
+              onClick={() => void startClient()}
+            >
+              Conectar cliente
+            </button>
+            <button
+              className="ghost danger"
+              disabled={busy || !sessionActive}
+              onClick={() => void stopSession()}
+            >
+              Detener
+            </button>
+          </div>
+          {daemonOnline && (
+            <p className="hint">
+              El PIN real del daemon se muestra abajo para emparejar el otro
+              equipo.
+            </p>
+          )}
+          <p className="hint small">
+            Registro: <code>{session?.logPath ?? "…"}</code>
+          </p>
+        </article>
+
         <article className="card pairing">
           <header>
             <h2>Emparejar</h2>
             <span className="badge">PIN por sesión</span>
           </header>
           <p className="muted">
-            Arranca el servidor en el equipo que tiene el teclado. El PIN cambia
-            en cada sesión y se muestra en su terminal.
+            Arranca el servidor en el equipo que tiene el teclado. Si dejas el
+            PIN vacío, el daemon genera uno y la ventana muestra el real.
           </p>
           <div className="pin-row">
-            <div className="pin">{pin || "••••••"}</div>
-            <button className="primary" onClick={() => void generatePin()}>
+            <div className="pin">{activePin || "••••••"}</div>
+            <button
+              className="ghost"
+              disabled={busy || daemonOnline}
+              onClick={() => void generatePin()}
+            >
               Generar PIN
             </button>
           </div>
@@ -437,7 +656,9 @@ export default function App() {
           </div>
           <p className="hint">
             En el otro equipo:{" "}
-            <code>alfone connect --server IP:24800 --pin {pin || "PIN"}</code>
+            <code>
+              alfone connect --server IP:24800 --pin {activePin || "PIN"}
+            </code>
           </p>
         </article>
 

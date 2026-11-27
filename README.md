@@ -98,6 +98,14 @@ pnpm install
 pnpm tauri dev
 ```
 
+El panel puede arrancar y detener la sesión: **Iniciar servidor** lanza
+`alfone serve` y muestra el PIN real que expone el daemon en `GET /session`;
+**Conectar cliente** lanza `alfone connect` (se niega si el daemon local está
+activo); **Detener** pide un apagado graceful al daemon o termina el cliente.
+La UI solo guarda el PID del proceso: la sesión QUIC sigue perteneciendo al
+daemon. La salida de ambos se escribe en `alfone-session.log` junto al
+archivo de configuración.
+
 Linux: `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf`.
 Windows: WebView2 (viene con Windows 10/11). macOS: Xcode CLT.
 

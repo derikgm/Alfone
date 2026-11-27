@@ -1,6 +1,6 @@
 # Plan de Alfone
 
-Última actualización: 2026-11-05
+Última actualización: 2026-11-27
 
 ## 1. Visión
 
@@ -169,11 +169,15 @@ en máquina con GTK/WebKit. *(checklist actualizado al cerrar la fase de UI)*
 **Criterio de salida:** Windows ↔ Linux comparten teclado/ratón en una LAN,
 con reconexión automática y sin pérdida de teclas. macOS se valida después.
 
-### M2 — Portapapeles y archivos (2–3 semanas)
+### M2 — Portapapeles y archivos (2–3 semanas) ✅ en curso
 
-- Texto/HTML/imagen con hashes y transferencia por streams separados.
-- Límite de tamaño, consentimiento y limpieza.
-- Arrastrar y soltar archivos (v2).
+- [x] Texto/HTML/PNG con SHA-256 y transferencia por streams unidireccionales
+  QUIC separados del control; chunks de 16 KiB y límite de 8 MiB.
+- [x] Límite de tamaño, consentimiento por transferencia (el receptor pide el
+  `transfer`), verificación antes de pegar y limpieza por TTL de 60 s.
+- [x] Consentimiento en vivo desde el panel (`GET/PUT /clipboard`) y tarjeta de
+  portapapeles en la UI.
+- [ ] Arrastrar y soltar archivos (v2).
 
 ### M3 — Audio (3–5 semanas)
 
@@ -265,13 +269,15 @@ vídeo: captura 5 ms + encode 5–15 ms + red 2 ms + decode 5–15 ms + present 
   servidor enruta la entrada por bordes, el cliente la inyecta y ambos vuelven
   con `Ctrl+Alt+Esc` o al salir por el borde.
 - `alfone-input`: traits, backend mock y backend Linux/X11 completo.
-- `apps/alfone-gui`: esqueleto Tauri 2 + React con estado, identidad, generador
-  de PIN y vista previa del layout.
-- `alfone-media`, `alfone-clipboard`: stubs; los formatos de audio/vídeo ya
-  están definidos en `alfone-protocol`.
+- `alfone-clipboard`: agente con `arboard`, estado de transferencia testeable,
+  PNG y side-car QUIC para texto/HTML/imagen.
+- `apps/alfone-gui`: Tauri 2 + React con estado, identidad, PIN, control de la
+  sesión del daemon, layout arrastrable y consentimiento del portapapeles.
+- `alfone-media`: stub; los formatos de audio/vídeo ya están definidos en
+  `alfone-protocol`.
 
-Lo que **no** está: backends Windows/macOS/Wayland, IPC UI ↔ daemon, audio real,
-vídeo real y driver de pantalla virtual. Son los siguientes hitos.
+Lo que **no** está: backends Windows/macOS/Wayland, audio real, vídeo real,
+arrastrar archivos y driver de pantalla virtual. Son los siguientes hitos.
 
 ### Probarlo ya (Linux/X11, dos terminales)
 

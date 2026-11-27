@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 
 mod http;
 
+use alfone_clipboard::{run as run_clipboard, ClipboardSettings};
 use alfone_core::{Config, Direction, Layout, LayoutConfig, ScreenConfig, DEFAULT_HTTP_PORT, DEFAULT_PORT};
 use alfone_core::random_token;
 use alfone_discovery::{browse, Advertiser, Announcement, SERVICE_TYPE};
@@ -572,12 +573,15 @@ async fn cmd_serve(explicit: Option<&Path>, args: ServeArgs) -> Result<()> {
         config.save_to(&path)?;
     }
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    // Shared with `/clipboard`, so the panel can toggle consent mid-session.
+    let clipboard = Arc::new(AtomicBool::new(config.clipboard));
     let http_state = http::HttpState {
         token: token.clone(),
         config_path: path.clone(),
         state: Arc::new(AtomicU8::new(http::STATE_IDLE)),
         pin: pin.clone(),
         shutdown: shutdown_tx,
+        clipboard: clipboard.clone(),
     };
     let http_state_task = http_state.clone();
     let session_state = http_state.state.clone();
@@ -668,6 +672,7 @@ async fn cmd_serve(explicit: Option<&Path>, args: ServeArgs) -> Result<()> {
                     local_screen,
                     side,
                     &local_name,
+                    clipboard.clone(),
                     &mut shutdown_rx,
                 )
                 .await
@@ -700,6 +705,16 @@ enum SessionEnd {
     Shutdown,
 }
 
+/// Keeps the clipboard side-car tied to the session's lifetime, including
+/// early returns from `tokio::select!`.
+struct ClipboardTaskGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for ClipboardTaskGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Resolves when the control panel asks for a graceful shutdown.
 async fn wait_shutdown(rx: &mut watch::Receiver<bool>) {
     loop {
@@ -717,6 +732,7 @@ async fn run_server_session(
     local_screen: ScreenInfo,
     side: Direction,
     local_name: &str,
+    clipboard: Arc<AtomicBool>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<SessionEnd> {
     let Peer {
@@ -761,6 +777,22 @@ async fn run_server_session(
     )))
     .await?;
     tx.send(Message::Layout(layout.snapshot())).await?;
+
+    // Clipboard runs on its own QUIC streams and reads the live consent flag
+    // from the HTTP control plane.
+    let clipboard_conn = link.connection().clone();
+    let clipboard_task = tokio::spawn(async move {
+        if let Err(e) = run_clipboard(
+            clipboard_conn,
+            ClipboardSettings::default(),
+            clipboard,
+        )
+        .await
+        {
+            warn!("clipboard synchronization stopped: {e:#}");
+        }
+    });
+    let _clipboard_guard = ClipboardTaskGuard(clipboard_task);
 
     println!(
         "  remote screen: {}x{} on the {}",
@@ -1113,6 +1145,7 @@ async fn cmd_connect(explicit: Option<&Path>, args: ConnectArgs) -> Result<()> {
         args.reconnect || config.client.auto_reconnect
     };
 
+    let clipboard = Arc::new(AtomicBool::new(config.clipboard));
     let mut expected = expected;
     let mut delay = Duration::from_secs(1);
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
@@ -1152,7 +1185,7 @@ async fn cmd_connect(explicit: Option<&Path>, args: ConnectArgs) -> Result<()> {
                     );
                 }
                 delay = Duration::from_secs(1);
-                match run_client_session(peer, &mut *inject, screen).await {
+                match run_client_session(peer, &mut *inject, screen, clipboard.clone()).await {
                     Ok(SessionEnd::Shutdown) => {
                         println!("disconnected");
                         return Ok(());
@@ -1192,6 +1225,7 @@ async fn run_client_session(
     peer: Peer,
     inject: &mut dyn Inject,
     screen: ScreenInfo,
+    clipboard: Arc<AtomicBool>,
 ) -> Result<SessionEnd> {
     let Peer {
         mut link,
@@ -1216,6 +1250,20 @@ async fn run_client_session(
         screen.height,
     )))
     .await?;
+
+    let clipboard_conn = link.connection().clone();
+    let clipboard_task = tokio::spawn(async move {
+        if let Err(e) = run_clipboard(
+            clipboard_conn,
+            ClipboardSettings::default(),
+            clipboard,
+        )
+        .await
+        {
+            warn!("clipboard synchronization stopped: {e:#}");
+        }
+    });
+    let _clipboard_guard = ClipboardTaskGuard(clipboard_task);
 
     let mut left_sent = false;
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());

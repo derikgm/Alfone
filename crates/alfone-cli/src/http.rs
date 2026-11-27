@@ -7,7 +7,7 @@
 //! persistence for now.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use alfone_core::{Config, Layout, LayoutConfig, DEFAULT_HTTP_PORT};
@@ -40,6 +40,8 @@ pub struct HttpState {
     pub pin: Option<String>,
     /// Set by `POST /session/shutdown`; the accept loop watches it.
     pub shutdown: watch::Sender<bool>,
+    /// Live clipboard consent, shared with the active session.
+    pub clipboard: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -54,6 +56,12 @@ pub struct SessionResponse {
     pub role: &'static str,
     pub state: u8,
     pub pin: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardResponse {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -76,6 +84,7 @@ pub fn router(state: HttpState) -> Router {
         .route("/status", get(status))
         .route("/session", get(session_get))
         .route("/session/shutdown", post(session_shutdown))
+        .route("/clipboard", get(clipboard_get).put(clipboard_put))
         .route("/layout", get(layout_get).put(layout_put))
         .with_state(state)
 }
@@ -153,6 +162,53 @@ async fn session_shutdown(
         return server_error("the daemon is already shutting down".into());
     }
     (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+}
+
+/// Clipboard consent is read on every session poll, so the panel can switch it
+/// on/off without restarting the daemon.
+async fn clipboard_get(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    (
+        StatusCode::OK,
+        Json(ClipboardResponse {
+            enabled: state.clipboard.load(Ordering::SeqCst),
+        }),
+    )
+        .into_response()
+}
+
+async fn clipboard_put(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(input): Json<ClipboardInput>,
+) -> Response {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    let Ok(mut config) = Config::load_or_create(Some(&state.config_path))
+        .map(|(config, _path)| config)
+    else {
+        return server_error("could not load the config".into());
+    };
+    config.clipboard = input.enabled;
+    if let Err(e) = config.save_to(&state.config_path) {
+        return server_error(format!("could not save the clipboard setting: {e}"));
+    }
+    state.clipboard.store(input.enabled, Ordering::SeqCst);
+    (
+        StatusCode::OK,
+        Json(ClipboardResponse {
+            enabled: input.enabled,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ClipboardInput {
+    enabled: bool,
 }
 
 async fn status(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -261,6 +317,7 @@ mod tests {
             state: Arc::new(AtomicU8::new(STATE_IDLE)),
             pin: Some("123456".into()),
             shutdown: watch::channel(false).0,
+            clipboard: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -357,6 +414,60 @@ mod tests {
             .unwrap();
         assert_eq!(accepted.status(), StatusCode::OK);
         assert!(*receiver.borrow());
+    }
+
+    #[tokio::test]
+    async fn clipboard_toggle_is_authorized_and_live() {
+        let state = test_state("secret");
+        let flag = state.clipboard.clone();
+        let app = router(state);
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/clipboard")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(flag.load(Ordering::SeqCst));
+
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/clipboard")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        assert!(!flag.load(Ordering::SeqCst));
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .uri("/clipboard")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(get.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["enabled"], false);
     }
 
     #[tokio::test]

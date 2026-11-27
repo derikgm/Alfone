@@ -24,6 +24,10 @@ type Health = {
   state: number;
 };
 
+type ClipboardState = {
+  enabled: boolean;
+};
+
 type DaemonSession = {
   role: string;
   state: number;
@@ -111,6 +115,7 @@ export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const [clipboard, setClipboard] = useState<ClipboardState | null>(null);
   const [layout, setLayout] = useState<Layout | null>(null);
   const [pin, setPin] = useState<string>("");
   const [clientAddress, setClientAddress] = useState<string>("");
@@ -134,6 +139,7 @@ export default function App() {
         setStatus(demoStatus);
         setHealth({ ok: true, state: 0 });
         setSession(demoSession);
+        setClipboard({ enabled: true });
         setLayout(demoLayout);
         return;
       }
@@ -190,6 +196,14 @@ export default function App() {
         if (!cancelled) {
           setSession(null);
         }
+      }
+      try {
+        const state = await invoke<ClipboardState>("clipboard_status");
+        if (!cancelled) {
+          setClipboard(state);
+        }
+      } catch {
+        /* keep the last known consent while the daemon restarts */
       }
     };
     void poll();
@@ -286,6 +300,23 @@ export default function App() {
         isTauri()
           ? await invoke<SessionInfo>("stop_session")
           : demoSession,
+      );
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleClipboard = async () => {
+    const enabled = !clipboard?.enabled;
+    setBusy(true);
+    try {
+      setClipboard(
+        isTauri()
+          ? await invoke<ClipboardState>("set_clipboard", { enabled })
+          : { enabled },
       );
       setError(null);
     } catch (e) {
@@ -736,6 +767,49 @@ export default function App() {
           </p>
         </article>
 
+        <article className="card clipboard">
+          <header>
+            <h2>Portapapeles</h2>
+            <span
+              className={
+                clipboard?.enabled ? "badge active-badge" : "badge muted-badge"
+              }
+            >
+              {clipboard?.enabled ? "activo" : "desactivado"}
+            </span>
+          </header>
+          <p className="muted">
+            Texto, HTML y PNG viajan en streams QUIC propios, en fragmentos de
+            16 KiB con SHA-256. El receptor pide cada transferencia y solo la
+            aplica si el hash coincide.
+          </p>
+          <div className="session-facts clipboard-facts">
+            <div>
+              <span>Formato</span>
+              <strong>Texto · HTML · PNG</strong>
+            </div>
+            <div>
+              <span>Límite</span>
+              <strong>8 MiB</strong>
+            </div>
+            <div>
+              <span>Consentimiento</span>
+              <strong>{clipboard?.enabled ? "por peer" : "apagado"}</strong>
+            </div>
+          </div>
+          <button
+            className={clipboard?.enabled ? "ghost danger" : "primary"}
+            disabled={busy}
+            onClick={() => void toggleClipboard()}
+          >
+            {clipboard?.enabled ? "Desactivar" : "Activar"}
+          </button>
+          <p className="hint">
+            El cambio afecta a la sesión en curso; sin daemon, se guarda para el
+            próximo arranque.
+          </p>
+        </article>
+
         <article className="card media">
           <header>
             <h2>Audio y vídeo</h2>
@@ -753,13 +827,6 @@ export default function App() {
               <div>
                 <strong>Segunda pantalla</strong>
                 <span>Espejo primero; monitor virtual después</span>
-              </div>
-              <span className="soon">Próximamente</span>
-            </li>
-            <li>
-              <div>
-                <strong>Portapapeles</strong>
-                <span>Texto, HTML e imágenes con hashes</span>
               </div>
               <span className="soon">Próximamente</span>
             </li>

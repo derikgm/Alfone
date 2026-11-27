@@ -10,6 +10,7 @@ name = "alfone"
 path = "src/main.rs"
 
 [dependencies]
+alfone-clipboard.workspace = true
 alfone-core.workspace = true
 alfone-discovery.workspace = true
 alfone-input.workspace = true

@@ -496,6 +496,67 @@ async fn health() -> Result<HealthResponse, String> {
         .map_err(|e| format!("invalid response from the alfone daemon: {e}"))
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardState {
+    enabled: bool,
+}
+
+/// Read clipboard consent from the daemon when it is up, otherwise from the
+/// saved config (the panel must not create a config just to read it).
+#[tauri::command]
+async fn clipboard_status() -> Result<ClipboardState, String> {
+    let (base_url, token) = ipc_endpoint();
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}/clipboard"))
+        .bearer_auth(&token)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await;
+    if let Ok(response) = response {
+        if response.status().is_success() {
+            return response
+                .json()
+                .await
+                .map_err(|e| format!("invalid clipboard response: {e}"));
+        }
+    }
+    let path = default_config_path();
+    let enabled = if path.exists() {
+        Config::load_or_create(Some(path.as_path()))
+            .map(|(config, _)| config.clipboard)
+            .map_err(|e| e.to_string())?
+    } else {
+        true
+    };
+    Ok(ClipboardState { enabled })
+}
+
+/// Persist consent and, when possible, apply it to the live daemon.
+#[tauri::command]
+async fn set_clipboard(enabled: bool) -> Result<ClipboardState, String> {
+    let (base_url, token) = ipc_endpoint();
+    let response = reqwest::Client::new()
+        .put(format!("{base_url}/clipboard"))
+        .bearer_auth(&token)
+        .json(&ClipboardState { enabled })
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    if let Ok(response) = response {
+        if response.status().is_success() {
+            return Ok(ClipboardState { enabled });
+        }
+    }
+    let path = default_config_path();
+    let mut config = Config::load_or_create(Some(path.as_path()))
+        .map(|(config, _)| config)
+        .map_err(|e| e.to_string())?;
+    config.clipboard = enabled;
+    config.save_to(&path).map_err(|e| e.to_string())?;
+    Ok(ClipboardState { enabled })
+}
+
 /// Current screen layout (`GET /layout`).
 #[tauri::command]
 async fn get_layout() -> Result<LayoutResponse, String> {
@@ -589,6 +650,8 @@ pub fn run() {
             start_client,
             stop_session,
             health,
+            clipboard_status,
+            set_clipboard,
             get_layout,
             set_layout,
             ipc_base_url

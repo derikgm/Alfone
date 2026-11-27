@@ -21,6 +21,7 @@ dependencies = [
 name = "alfone-cli"
 version = "0.1.0"
 dependencies = [
+ "alfone-clipboard",
  "alfone-core",
  "alfone-discovery",
  "alfone-input",
@@ -44,8 +45,11 @@ dependencies = [
  "alfone-protocol",
  "anyhow",
  "arboard",
+ "image",
+ "quinn",
  "sha2",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

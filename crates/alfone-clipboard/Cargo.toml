@@ -9,6 +9,9 @@ rust-version.workspace = true
 alfone-protocol.workspace = true
 anyhow.workspace = true
 arboard = "3.7"
+image = { version = "0.25", default-features = false, features = ["png"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true

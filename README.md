@@ -72,6 +72,12 @@ Mueve el puntero hasta el borde derecho del PC A para controlar el PC B.
 pantalla y `Ctrl+Alt+L` bloquea/desbloquea la entrada remota. `alfone connect`
 recuerda la huella del servidor si antes ejecutaste `alfone pair`.
 
+El portapapeles se sincroniza mientras `clipboard = true` en la configuración.
+Texto, HTML y PNG se envían en streams unidireccionales QUIC separados del
+canal de entrada, en fragmentos de 16 KiB con SHA-256 y un límite de 8 MiB.
+El receptor solicita cada transferencia y solo escribe el portapapeles local si
+el tamaño y el hash coinciden. El panel puede activarlo o desactivarlo en caliente.
+
 Para medir la calidad del enlace sin iniciar una sesión KVM:
 
 ```bash

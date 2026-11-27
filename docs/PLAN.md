@@ -161,7 +161,10 @@ en máquina con GTK/WebKit. *(checklist actualizado al cerrar la fase de UI)*
 - [x] Test de latencia: `alfone latency --server <ip> --pin <pin>` mide RTT
   con Ping/Pong sobre QUIC y reporta min/avg/p50/p95/max y pérdida. Probado en
   vivo contra el daemon local (8 pings, 0% pérdida).
-- *Soak test* de 24 h: pendiente; requiere dos máquinas reales en LAN.
+- [x] Helper de *soak test*: `scripts/soak.sh server|client --seconds N`
+  mantiene cada extremo en marcha, vigila `/health` en el servidor, cuenta
+  reconexiones y escribe un resumen. Probado con una ejecución corta en local.
+  La corrida completa de 24 h en LAN con dos máquinas sigue pendiente.
 
 **Criterio de salida:** Windows ↔ Linux comparten teclado/ratón en una LAN,
 con reconexión automática y sin pérdida de teclas. macOS se valida después.

@@ -81,6 +81,11 @@ cargo run -p alfone-cli -- latency --server 192.168.1.20:24800 --pin 123456 \
 
 Imprime el RTT de cada ping y un resumen con min, avg, p50, p95, max y pérdida.
 
+Para una prueba prolongada, ejecuta `./scripts/soak.sh server` en el PC A y
+`./scripts/soak.sh client --server <ip> --pin <pin>` en el PC B. Por defecto
+dura 24 h; usa `--seconds 600` para una prueba corta. El script guarda logs y
+un resumen con reconexiones y errores en `logs/soak/`.
+
 La entrada remota se inyecta con XTEST en Linux y `SendInput` en Windows, así
 que el PC B también puede usarse con su propio teclado. La reconexión
 automática ya está incluida; macOS y Wayland se abordarán en hitos posteriores.

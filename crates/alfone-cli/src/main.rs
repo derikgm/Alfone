@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tracing::{debug, info, warn};
@@ -73,6 +73,8 @@ enum Command {
     Serve(ServeArgs),
     /// Run the client: receive input from a server.
     Connect(ConnectArgs),
+    /// Measure round-trip latency over the QUIC control link.
+    Latency(LatencyArgs),
 }
 
 #[derive(clap::Args)]
@@ -136,6 +138,28 @@ struct ConnectArgs {
     no_reconnect: bool,
 }
 
+#[derive(clap::Args)]
+struct LatencyArgs {
+    /// Server address, e.g. 192.168.1.20:24800.
+    #[arg(long, default_value = "127.0.0.1:24800")]
+    server: String,
+    /// PIN shown by `alfone serve` (unless pairing is disabled).
+    #[arg(long)]
+    pin: Option<String>,
+    /// Expected server fingerprint; overrides the saved one.
+    #[arg(long)]
+    fingerprint: Option<String>,
+    /// Number of pings to send.
+    #[arg(long, default_value_t = 20)]
+    count: u32,
+    /// Milliseconds to wait between pings.
+    #[arg(long, default_value_t = 100)]
+    interval: u64,
+    /// Milliseconds to wait for each pong before counting a loss.
+    #[arg(long, default_value_t = 2000)]
+    timeout: u64,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Side {
     Left,
@@ -171,6 +195,7 @@ async fn main() -> Result<()> {
         Command::Pair(args) => cmd_pair(cli.config.as_deref(), args).await,
         Command::Serve(args) => cmd_serve(cli.config.as_deref(), args).await,
         Command::Connect(args) => cmd_connect(cli.config.as_deref(), args).await,
+        Command::Latency(args) => cmd_latency(cli.config.as_deref(), args).await,
     }
 }
 
@@ -337,6 +362,156 @@ async fn cmd_pair(explicit: Option<&Path>, args: PairArgs) -> Result<()> {
         .await
         .ok();
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// latency
+// ---------------------------------------------------------------------------
+
+/// Measure link RTT by exchanging sequenced Ping/Pong messages. The server
+/// already answers every `Ping`, so this works without capturing any input.
+async fn cmd_latency(explicit: Option<&Path>, args: LatencyArgs) -> Result<()> {
+    if args.count == 0 {
+        anyhow::bail!("--count must be at least 1");
+    }
+
+    let (config, path) = Config::load_or_create(explicit)?;
+    let _identity = Identity::load_or_create(identity_dir(&path))?;
+
+    let addr = parse_endpoint(&args.server, DEFAULT_PORT)?;
+    let expected = match &args.fingerprint {
+        Some(text) => Some(
+            parse_hex_fingerprint(text)
+                .with_context(|| format!("invalid fingerprint: {text}"))?,
+        ),
+        None => {
+            if config.client.fingerprint.is_empty() {
+                None
+            } else {
+                Some(
+                    parse_hex_fingerprint(&config.client.fingerprint)
+                        .context("the saved server fingerprint is invalid")?,
+                )
+            }
+        }
+    };
+
+    println!("connecting to {addr} ...");
+    let peer = connect(
+        addr,
+        ConnectOptions {
+            expected_fingerprint: expected,
+            pin: args.pin.clone(),
+            ..ConnectOptions::default()
+        },
+        device_info(&config),
+        capabilities(&config),
+        SessionMode::Kvm,
+    )
+    .await
+    .context("could not connect")?;
+
+    println!(
+        "server: '{}' ({:?}), fingerprint {} ({})",
+        peer.device.name,
+        peer.device.os,
+        hex(&peer.fingerprint),
+        alfone_net::short_code(&peer.fingerprint)
+    );
+
+    // The server expects the client to announce its displays first and drops
+    // any earlier message. Announce a nominal screen before sending pings so
+    // the first ping actually reaches the session loop.
+    peer.link
+        .send(Message::Displays(DisplayInfo::single(1920, 1080)))
+        .await?;
+
+    println!(
+        "measuring {} pings over QUIC (interval {} ms, timeout {} ms) ...",
+        args.count, args.interval, args.timeout
+    );
+
+    let mut link = peer.link;
+    let mut rtts = Vec::with_capacity(args.count as usize);
+    let mut lost = 0u32;
+    let timeout = Duration::from_millis(args.timeout);
+
+    for id in 1..=u64::from(args.count) {
+        let started = Instant::now();
+        link.send(Message::Ping { id }).await?;
+        let mut rtt = None;
+        loop {
+            match tokio::time::timeout(timeout, link.recv()).await {
+                Ok(Some(Message::Pong { id: reply })) if reply == id => {
+                    rtt = Some(started.elapsed());
+                    break;
+                }
+                Ok(Some(Message::Disconnect { reason })) => {
+                    anyhow::bail!("server disconnected: {reason}");
+                }
+                Ok(Some(Message::Error { message, .. })) => {
+                    anyhow::bail!("server error: {message}");
+                }
+                Ok(Some(_)) => continue, // unrelated control traffic
+                Ok(None) => anyhow::bail!("connection closed"),
+                Err(_) => break,
+            }
+        }
+        match rtt {
+            Some(rtt) => {
+                println!("  {id:>4}: {:>8.2} ms", rtt.as_secs_f64() * 1000.0);
+                rtts.push(rtt);
+            }
+            None => {
+                println!("  {id:>4}: lost");
+                lost += 1;
+            }
+        }
+        if args.interval > 0 && id < u64::from(args.count) {
+            tokio::time::sleep(Duration::from_millis(args.interval)).await;
+        }
+    }
+
+    link.send(Message::Disconnect {
+        reason: "latency test complete".into(),
+    })
+    .await
+    .ok();
+
+    if rtts.is_empty() {
+        println!("no pongs received; all {lost} ping(s) lost");
+        return Ok(());
+    }
+    rtts.sort();
+    let total = rtts.len();
+    let avg = rtts.iter().copied().sum::<Duration>() / total as u32;
+    let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+    println!();
+    println!(
+        "rtt: min {:.2} ms | avg {:.2} ms | p50 {:.2} ms | p95 {:.2} ms | max {:.2} ms",
+        ms(rtts[0]),
+        ms(avg),
+        ms(percentile(&rtts, 0.50)),
+        ms(percentile(&rtts, 0.95)),
+        ms(rtts[total - 1])
+    );
+    println!(
+        "loss: {}/{} ({:.1}%)",
+        lost,
+        args.count,
+        lost as f64 * 100.0 / args.count as f64
+    );
+    Ok(())
+}
+
+/// Nearest-rank percentile of an already sorted slice.
+fn percentile(sorted: &[Duration], fraction: f32) -> Duration {
+    if sorted.is_empty() {
+        return Duration::ZERO;
+    }
+    let last = sorted.len() - 1;
+    let index = (last as f32 * fraction.clamp(0.0, 1.0)).round() as usize;
+    sorted[index.min(last)]
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,6 +1515,16 @@ mod tests {
         assert!(!is_repeat(KeyAction::Release, 0x6c, &mut down));
         assert!(!is_repeat(KeyAction::Press, 0x6c, &mut down));
         assert!(is_repeat(KeyAction::Repeat, 0x6c, &mut down));
+    }
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        let samples: Vec<Duration> = (1..=5).map(Duration::from_millis).collect();
+        assert_eq!(percentile(&samples, 0.0), Duration::from_millis(1));
+        assert_eq!(percentile(&samples, 0.5), Duration::from_millis(3));
+        assert_eq!(percentile(&samples, 0.95), Duration::from_millis(5));
+        assert_eq!(percentile(&samples, 1.0), Duration::from_millis(5));
+        assert_eq!(percentile(&[], 0.5), Duration::ZERO);
     }
 
     #[test]

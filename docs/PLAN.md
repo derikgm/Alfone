@@ -158,7 +158,10 @@ en máquina con GTK/WebKit. *(checklist actualizado al cerrar la fase de UI)*
 - [x] Atajos para cambiar de pantalla y bloquear la entrada remota
   (`Ctrl+Alt+flechas`, `Ctrl+Alt+L`, `Ctrl+Alt+Esc`), con guard contra
   autorepeat; verificados en vivo contra el daemon en X11.
-- Tests de latencia y *soak test* de 24 h.
+- [x] Test de latencia: `alfone latency --server <ip> --pin <pin>` mide RTT
+  con Ping/Pong sobre QUIC y reporta min/avg/p50/p95/max y pérdida. Probado en
+  vivo contra el daemon local (8 pings, 0% pérdida).
+- *Soak test* de 24 h: pendiente; requiere dos máquinas reales en LAN.
 
 **Criterio de salida:** Windows ↔ Linux comparten teclado/ratón en una LAN,
 con reconexión automática y sin pérdida de teclas. macOS se valida después.

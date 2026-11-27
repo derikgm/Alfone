@@ -68,12 +68,22 @@ cargo run -p alfone-cli -- connect --server 192.168.1.20:24800 --pin 123456
 ```
 
 Mueve el puntero hasta el borde derecho del PC A para controlar el PC B.
-`Ctrl+Alt+Esc` devuelve el control al PC A. `alfone connect` recuerda la huella
-del servidor si antes ejecutaste `alfone pair`.
+`Ctrl+Alt+Esc` devuelve el control al PC A, `Ctrl+Alt+flechas` cambia de
+pantalla y `Ctrl+Alt+L` bloquea/desbloquea la entrada remota. `alfone connect`
+recuerda la huella del servidor si antes ejecutaste `alfone pair`.
 
-La entrada remota se inyecta con XTEST, así que el PC B también puede usarse
-con su propio teclado. En M1 se añadirán los backends de Windows, macOS y
-Wayland, y la reconexión automática.
+Para medir la calidad del enlace sin iniciar una sesión KVM:
+
+```bash
+cargo run -p alfone-cli -- latency --server 192.168.1.20:24800 --pin 123456 \
+  --count 50 --interval 100 --timeout 2000
+```
+
+Imprime el RTT de cada ping y un resumen con min, avg, p50, p95, max y pérdida.
+
+La entrada remota se inyecta con XTEST en Linux y `SendInput` en Windows, así
+que el PC B también puede usarse con su propio teclado. La reconexión
+automática ya está incluida; macOS y Wayland se abordarán en hitos posteriores.
 
 ## Compilar la UI (requiere dependencias del sistema)
 

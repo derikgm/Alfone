@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type Side = "left" | "right" | "top" | "bottom";
@@ -84,6 +90,13 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const localRef = useRef<HTMLDivElement>(null);
+  const remoteRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ x: number; y: number; dx: number; dy: number } | null>(
+    null,
+  );
+  const [drag, setDrag] = useState<{ dx: number; dy: number } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -200,10 +213,11 @@ export default function App() {
     bottom: "abajo",
   };
 
-  const saveLayout = async () => {
+  const saveLayout = async (override?: Side) => {
     if (!layout || !localScreen || !remoteScreen) {
       return;
     }
+    const chosen = override ?? side;
     const opposite: Record<Side, Side> = {
       left: "right",
       right: "left",
@@ -223,10 +237,10 @@ export default function App() {
     };
     const screens = layout.screens.map((screen) => {
       if (screen.id === localScreen.id) {
-        return link(screen, side, remoteScreen.id);
+        return link(screen, chosen, remoteScreen.id);
       }
       if (screen.id === remoteScreen.id) {
-        return link(screen, opposite[side], localScreen.id);
+        return link(screen, opposite[chosen], localScreen.id);
       }
       return { ...screen, left: null, right: null, top: null, bottom: null };
     });
@@ -242,6 +256,7 @@ export default function App() {
         });
         setLayout(updated);
       }
+      setSide(chosen);
       setSaved(true);
       setError(null);
       window.setTimeout(() => setSaved(false), 1800);
@@ -249,6 +264,59 @@ export default function App() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Drag the remote screen on the canvas. On drop, snap it to the side of the
+  // local screen it was moved towards and persist the new neighbour links.
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { x: event.clientX, y: event.clientY, dx: 0, dy: 0 };
+    setDrag({ dx: 0, dy: 0 });
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const origin = dragRef.current;
+    if (!origin) {
+      return;
+    }
+    origin.dx = event.clientX - origin.x;
+    origin.dy = event.clientY - origin.y;
+    setDrag({ dx: origin.dx, dy: origin.dy });
+  };
+
+  const endDrag = (_event: ReactPointerEvent<HTMLDivElement>) => {
+    const origin = dragRef.current;
+    dragRef.current = null;
+    setDrag(null);
+    if (!origin || !localRef.current || !remoteRef.current) {
+      return;
+    }
+    if (Math.hypot(origin.dx, origin.dy) < 14) {
+      return;
+    }
+    // The remote element still has the drag transform applied here, so its
+    // bounding box is the position the user actually dropped it at.
+    const localBox = localRef.current.getBoundingClientRect();
+    const remoteBox = remoteRef.current.getBoundingClientRect();
+    const dx =
+      remoteBox.left + remoteBox.width / 2 - (localBox.left + localBox.width / 2);
+    const dy =
+      remoteBox.top + remoteBox.height / 2 - (localBox.top + localBox.height / 2);
+    const next: Side =
+      Math.abs(dx) >= Math.abs(dy)
+        ? dx >= 0
+          ? "right"
+          : "left"
+        : dy >= 0
+          ? "bottom"
+          : "top";
+    if (next !== side) {
+      void saveLayout(next);
     }
   };
 
@@ -380,8 +448,11 @@ export default function App() {
               {layout ? `${layout.screens.length} pantalla(s)` : "KVM"}
             </span>
           </header>
-          <div className={`canvas side-${side}`}>
-            <div className="screen local">
+          <div
+            ref={canvasRef}
+            className={`canvas side-${side}${drag ? " dragging" : ""}`}
+          >
+            <div ref={localRef} className="screen local">
               <span>{localScreen?.name ?? "Este equipo"}</span>
               <small>
                 {localScreen
@@ -389,7 +460,22 @@ export default function App() {
                   : "…"}
               </small>
             </div>
-            <div className="screen remote">
+            <div
+              ref={remoteRef}
+              className="screen remote"
+              style={
+                drag
+                  ? {
+                      transform: `translate(${drag.dx}px, ${drag.dy}px)`,
+                      zIndex: 2,
+                    }
+                  : undefined
+              }
+              onPointerDown={startDrag}
+              onPointerMove={moveDrag}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+            >
               <span>{remoteScreen?.name ?? "Remoto"}</span>
               <small>
                 {remoteScreen
@@ -424,7 +510,7 @@ export default function App() {
           </button>
           <p className="hint">
             {remoteScreen
-              ? `El remoto quedará a la ${sideLabel[side]} de este equipo. Se aplica en la próxima sesión.`
+              ? `Arrastra la pantalla remota para colocarla. Ahora está a la ${sideLabel[side]} de este equipo; también puedes elegir el lado con los botones.`
               : "Añade una segunda pantalla al layout para poder colocarla."}
           </p>
         </article>

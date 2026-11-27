@@ -371,6 +371,19 @@ h3 {
   border-color: rgba(88, 211, 165, 0.55);
   background: linear-gradient(180deg, #14382e, #0d1b17);
   color: #a9ecd5;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  transition: transform 160ms ease;
+}
+
+.canvas.dragging {
+  border-color: rgba(88, 211, 165, 0.65);
+}
+
+.canvas.dragging .screen.remote {
+  cursor: grabbing;
+  transition: none;
 }
 
 .side-top .screen.remote,

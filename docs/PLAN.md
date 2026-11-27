@@ -151,10 +151,13 @@ en máquina con GTK/WebKit. *(checklist actualizado al cerrar la fase de UI)*
   modo remoto vía flag global que el hook lee para tragar eventos locales).
 - Backend macOS (CGEventTap + CGEventPost; permisos de Accesibilidad).
   *(pospuesto: fuera del alcance inicial Linux X11 + Windows 11)*
-- Layout gráfico en la UI (arrastrar pantallas como en Input Leap).
+- [x] Layout gráfico en la UI: la pantalla remota se arrastra sobre el lienzo
+  y al soltar se ajusta al lado más cercano y se guarda vía `PUT /layout`.
 - [x] Descubrimiento mDNS y emparejamiento con código
   (`alfone discover`, `serve --discovery`, `connect --name`; test red `--ignored`).
-- Atajos para cambiar de pantalla y bloquear la entrada remota.
+- [x] Atajos para cambiar de pantalla y bloquear la entrada remota
+  (`Ctrl+Alt+flechas`, `Ctrl+Alt+L`, `Ctrl+Alt+Esc`), con guard contra
+  autorepeat; verificados en vivo contra el daemon en X11.
 - Tests de latencia y *soak test* de 24 h.
 
 **Criterio de salida:** Windows ↔ Linux comparten teclado/ratón en una LAN,

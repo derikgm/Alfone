@@ -974,11 +974,14 @@ async fn run_server_session(
             }
 
             message = link.recv() => {
-                let Some(message) = message else { break };
+                let Some(message) = message else {
+                    warn!("client link closed unexpectedly");
+                    break
+                };
                 match message {
                     Message::LeaveScreen(LeaveScreen { sequence: seq }) => {
                         if remote {
-                            debug!(seq, "client left the remote screen");
+                            info!(seq, "client left the remote screen");
                             return_to_local(inject, &layout, entry, remote_pos, remote_screen)?;
                             remote = false;
                             last = inject.pointer().unwrap_or((local_w / 2, local_h / 2));
@@ -1271,7 +1274,10 @@ async fn run_client_session(
     loop {
         tokio::select! {
             message = link.recv() => {
-                let Some(message) = message else { return Ok(SessionEnd::Closed) };
+                let Some(message) = message else {
+                    warn!("server link closed unexpectedly");
+                    return Ok(SessionEnd::Closed)
+                };
                 match message {
                     Message::Input(event) => {
                         inject.inject(&event)?;

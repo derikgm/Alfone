@@ -610,6 +610,16 @@ impl Inject for X11Inject {
 
     fn set_remote_mode(&mut self, remote: bool) -> Result<()> {
         let root = self.root();
+        // The pointer is warped to the center while remote so XRecord keeps
+        // delivering relative motion. Hide it so that internal warp is invisible.
+        let cursor = if remote {
+            x11rb::protocol::xfixes::hide_cursor(&self.conn, root)
+        } else {
+            x11rb::protocol::xfixes::show_cursor(&self.conn, root)
+        };
+        if let Err(e) = cursor?.check() {
+            tracing::warn!(?e, "could not toggle the local cursor visibility");
+        }
         if remote {
             let mask = xproto::EventMask::BUTTON_PRESS
                 | xproto::EventMask::BUTTON_RELEASE
